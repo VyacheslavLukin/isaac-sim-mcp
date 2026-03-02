@@ -1294,6 +1294,70 @@ def stop_g1_policy_walk() -> str:
 
 
 # -------------------------------------------------------------------------
+# Stage loading tools
+# -------------------------------------------------------------------------
+
+
+@mcp.tool("load_stage_from_path")
+def load_stage_from_path(usd_path: str) -> Dict[str, Any]:
+    """Open a USD file as the current Isaac Sim stage, replacing whatever is open now.
+
+    The path is resolved inside the Isaac Sim process. If Isaac Sim runs in Docker,
+    the path must be visible inside the container (e.g. bind mount sim_worlds/).
+    Relative references inside the USD file (e.g. to a .usdz) are resolved relative
+    to the directory of usd_path; keep referenced assets co-located in the same directory.
+
+    Use this tool to open a full USD scene (with physics, materials, and objects) without
+    using execute_script. Prefer this over load_usd_reference_from_path when the asset
+    carries its own physics scene.
+
+    Args:
+        usd_path: Absolute path to the USD/USDA/USDZ file visible to the Isaac Sim process.
+
+    Returns:
+        Dictionary with status and message.
+    """
+    try:
+        isaac = get_isaac_connection()
+        result = isaac.send_command("load_stage_from_path", {"usd_path": usd_path})
+        return {"status": result.get("status", "success"), "message": result.get("message", f"Opened stage from {usd_path}")}
+    except Exception as e:
+        logger.error(f"Error in load_stage_from_path: {str(e)}")
+        return {"status": "error", "message": str(e)}
+
+
+@mcp.tool("load_usd_reference_from_path")
+def load_usd_reference_from_path(usd_path: str, prim_path: str) -> Dict[str, Any]:
+    """Add a USD reference at prim_path in the current Isaac Sim stage.
+
+    The path is resolved inside the Isaac Sim process. If Isaac Sim runs in Docker,
+    the path must be visible inside the container (e.g. bind mount sim_worlds/).
+
+    Note: if the referenced USD uses a different upAxis (e.g. Y-up) than the current
+    stage (e.g. Z-up), the referenced content may appear rotated. When the asset carries
+    its own physics scene, prefer load_stage_from_path instead.
+
+    Args:
+        usd_path: Absolute path to the USD/USDA/USDZ file visible to the Isaac Sim process.
+        prim_path: Prim path in the current stage where the reference will be anchored
+                   (must start with '/'), e.g. '/World/MySplat'.
+
+    Returns:
+        Dictionary with status, message, and prim_path on success.
+    """
+    try:
+        isaac = get_isaac_connection()
+        result = isaac.send_command("load_usd_reference_from_path", {"usd_path": usd_path, "prim_path": prim_path})
+        out: Dict[str, Any] = {"status": result.get("status", "success"), "message": result.get("message", f"Referenced {usd_path} at {prim_path}")}
+        if result.get("prim_path"):
+            out["prim_path"] = result["prim_path"]
+        return out
+    except Exception as e:
+        logger.error(f"Error in load_usd_reference_from_path: {str(e)}")
+        return {"status": "error", "message": str(e)}
+
+
+# -------------------------------------------------------------------------
 # Navigation tools
 # -------------------------------------------------------------------------
 

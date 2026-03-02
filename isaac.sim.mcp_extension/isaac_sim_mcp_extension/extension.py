@@ -21,6 +21,7 @@ from isaac_sim_mcp_extension.policy.policy_runner import PolicyRunner
 from isaac_sim_mcp_extension.robots.robot_controller import RobotController
 from isaac_sim_mcp_extension.robots.robot_factory import RobotFactory
 from isaac_sim_mcp_extension.scene.scene_manager import SceneManager
+from isaac_sim_mcp_extension.scene.stage_loader import StageLoader
 from isaac_sim_mcp_extension.server.command_dispatcher import CommandDispatcher
 from isaac_sim_mcp_extension.server.socket_server import SocketServer
 
@@ -46,6 +47,7 @@ class MCPExtension(omni.ext.IExt):
         self._navigation = NavigationController(self._state, self._policy_runner, self._robot_factory)
         self._asset_generator = AssetGenerator(self._state)
         self._asset_loader = AssetLoader()
+        self._stage_loader = StageLoader()
 
     def on_startup(self, ext_id: str) -> None:
         self.ext_id = ext_id
@@ -97,6 +99,10 @@ class MCPExtension(omni.ext.IExt):
         self._dispatcher.register("navigate_to", self._navigation.navigate_to)
         self._dispatcher.register("stop_navigation", self._navigation.stop_navigation)
         self._dispatcher.register("get_navigation_status", self._navigation.get_navigation_status)
+
+        # Stage loading APIs
+        self._dispatcher.register("load_stage_from_path", self._stage_loader.open_stage_from_path)
+        self._dispatcher.register("load_usd_reference_from_path", self._stage_loader.load_reference_from_path)
 
     def execute_command(self, command: Dict[str, Any]) -> Dict[str, Any]:
         """Dispatch command through validated command dispatcher.
