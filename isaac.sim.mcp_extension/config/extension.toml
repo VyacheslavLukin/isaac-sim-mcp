@@ -23,5 +23,6 @@ name = "isaac_sim_mcp_extension"
 
 
 [settings]
+# Listen on 0.0.0.0 so host can forward port 8766 from container (e.g. Docker publish 8766:8766)
 server.socket = 8766
-server.host = "localhost"
+server.host = "0.0.0.0"
