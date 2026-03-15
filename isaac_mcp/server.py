@@ -1393,7 +1393,7 @@ def navigate_to(
         executor = IsaacSimExecutor(isaac, _nav_lock, robot_prim_path=robot_prim_path)
         current_xy, _ = executor.get_pose()
 
-        boxes = obstacle_boxes if obstacle_boxes else [list(box) for box in _DEFAULT_OBSTACLE_BOXES]
+        boxes = obstacle_boxes if obstacle_boxes is not None else [list(box) for box in _DEFAULT_OBSTACLE_BOXES]
         if any(len(box) < 4 for box in boxes):
             return "Error starting navigation: each obstacle box must be [cx, cy, sx, sy]"
 
@@ -1402,7 +1402,44 @@ def navigate_to(
         planner = AStarPlanner(grid)
         waypoints = planner.plan((float(current_xy[0]), float(current_xy[1])), (target_x, target_y))
         if not waypoints:
-            return "Error starting navigation: no path found to target"
+            start_cell = grid.world_to_grid(float(current_xy[0]), float(current_xy[1]))
+            goal_cell  = grid.world_to_grid(target_x, target_y)
+            detail = (
+                f"start={float(current_xy[0]):.2f},{float(current_xy[1]):.2f} "
+                f"(cell occupied={grid.is_occupied(*start_cell)}), "
+                f"goal={target_x:.2f},{target_y:.2f} "
+                f"(cell occupied={grid.is_occupied(*goal_cell)}), "
+                f"obstacles={len(boxes)}"
+            )
+            return f"Error starting navigation: no path found to target — {detail}"
+
+        # ------------------------------------------------------------------
+        # Optional: visualize waypoints in the Isaac Sim stage.
+        # Creates small sphere markers under /World/NavWaypoints so users can
+        # see the planned path. Failure to create markers should not break nav.
+        # ------------------------------------------------------------------
+        try:
+            points_repr = ", ".join(f"({float(wx):.3f}, {float(wy):.3f})" for wx, wy in waypoints)
+            code = (
+                "import omni.usd\n"
+                "from pxr import UsdGeom, Gf\n"
+                "stage = omni.usd.get_context().get_stage()\n"
+                "parent_path = '/World/NavWaypoints'\n"
+                "prim = stage.GetPrimAtPath(parent_path)\n"
+                "if prim:\n"
+                "    stage.RemovePrim(parent_path)\n"
+                "parent = UsdGeom.Xform.Define(stage, parent_path)\n"
+                f"points = [{points_repr}]\n"
+                "for i, (wx, wy) in enumerate(points):\n"
+                "    prim_path = f'{parent_path}/wp_{i}'\n"
+                "    sphere = UsdGeom.Sphere.Define(stage, prim_path)\n"
+                "    sphere.CreateRadiusAttr(0.15)\n"
+                "    xform = UsdGeom.Xformable(sphere.GetPrim())\n"
+                "    xform.AddTranslateOp().Set(Gf.Vec3d(wx, wy, 0.05))\n"
+            )
+            isaac.send_command("execute_script", {"code": code})
+        except Exception as marker_err:
+            logger.warning(f"Failed to create navigation waypoint markers: {marker_err}")
 
         new_follower = WaypointFollower(executor=executor, arrival_dist_m=arrival_threshold)
 

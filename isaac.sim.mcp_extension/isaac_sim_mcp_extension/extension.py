@@ -52,8 +52,9 @@ class MCPExtension(omni.ext.IExt):
     def on_startup(self, ext_id: str) -> None:
         self.ext_id = ext_id
         self._state.usd_context = omni.usd.get_context()
-        self._state.port = self._state.settings.get("/exts/isaac.sim.mcp/server, port") or 8766
-        self._state.host = self._state.settings.get("/exts/isaac.sim.mcp/server.host") or "localhost"
+        # Read from this extension's settings (extension.toml [settings]); use ext_id so config is found.
+        self._state.port = self._state.settings.get(f"/exts/{ext_id}/server.socket") or 8766
+        self._state.host = self._state.settings.get(f"/exts/{ext_id}/server.host") or "localhost"
         self._register_handlers()
         self._socket_server = SocketServer(self._state.host, self._state.port, self.execute_command)
         self._socket_server.start()

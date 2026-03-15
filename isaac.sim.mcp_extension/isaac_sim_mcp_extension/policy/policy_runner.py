@@ -273,6 +273,22 @@ class PolicyRunner:
                         policy_to_robot=None,
                     )
 
+                    # Align observation length with policy input dimension.
+                    # The loaded policy was traced with expected_obs_dim inputs (e.g. 123 or 310).
+                    # If the runtime observation is longer (e.g. extra features added on MCP side),
+                    # slice to the first expected_obs_dim entries so matmul shapes match.
+                    if obs.shape[-1] != expected_obs_dim:
+                        if self._state.policy.walk_step_count <= 3:
+                            carb.log_warn(
+                                f"[WALK] obs dim {obs.shape[-1]} != expected {expected_obs_dim}; "
+                                f"adapting to policy input size"
+                            )
+                        if obs.shape[-1] >= expected_obs_dim:
+                            obs = obs[:expected_obs_dim]
+                        else:
+                            # Pad with zeros if the observation is unexpectedly short.
+                            obs = np.pad(obs, (0, expected_obs_dim - obs.shape[-1]))
+
                     # --- Policy inference ---
                     with torch.no_grad():
                         obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(

@@ -28,9 +28,24 @@ class AStarPlanner:
     def __init__(self, grid: OccupancyGrid):
         self.grid = grid
 
+    def _snap_to_free(self, cell: tuple[int, int], max_radius: int = 10) -> tuple[int, int] | None:
+        """Return the nearest free cell within max_radius, or None if none found."""
+        if not self.grid.is_occupied(cell[0], cell[1]):
+            return cell
+        for r in range(1, max_radius + 1):
+            for dx in range(-r, r + 1):
+                for dy in range(-r, r + 1):
+                    if abs(dx) == r or abs(dy) == r:
+                        c = (cell[0] + dx, cell[1] + dy)
+                        if not self.grid.is_occupied(c[0], c[1]):
+                            return c
+        return None
+
     def plan(self, start_world: tuple[float, float], goal_world: tuple[float, float]) -> list[tuple[float, float]]:
         start = self.grid.world_to_grid(start_world[0], start_world[1])
         goal = self.grid.world_to_grid(goal_world[0], goal_world[1])
+        start = self._snap_to_free(start) or start
+        goal = self._snap_to_free(goal) or goal
         raw_path = self._astar(start, goal)
         if not raw_path:
             return []
