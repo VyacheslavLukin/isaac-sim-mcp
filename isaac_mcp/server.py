@@ -1530,6 +1530,84 @@ def get_navigation_status() -> str:
         return f"Error getting navigation status: {str(e)}"
 
 
+@mcp.tool("capture_viewport")
+def capture_viewport(
+    output_path: str = "/home/sim_worlds/viewport_capture.png",
+    width: int = 1280,
+    height: int = 720,
+) -> Image:
+    """Capture the current Isaac Sim viewport as a PNG screenshot.
+
+    Saves the image to *output_path* on the shared volume (accessible on the
+    host at /home/ubuntu/sim_worlds/viewport_capture.png) and returns it as an
+    inline MCP Image so the AI client can view what is happening in the
+    simulation.
+
+    Three capture strategies are attempted in order:
+      1. omni.replicator.core  – works in headless and streaming modes
+      2. omni.renderer_capture – lightweight GUI-mode fallback
+      3. omni.kit.viewport.utility – viewport schedule_capture fallback
+
+    Args:
+        output_path: Absolute path (inside the container) where the PNG is
+                     written.  Must be on a volume shared with the host.
+                     Default: /home/sim_worlds/viewport_capture.png
+        width:  Render width in pixels  (replicator path only).  Default 1280.
+        height: Render height in pixels (replicator path only).  Default 720.
+
+    Returns:
+        MCP Image for inline display plus a JSON footer with file_path.
+    """
+    import time as _time
+
+    # The container path maps to this host path via the bind mount.
+    host_path = output_path.replace("/home/sim_worlds", "/home/ubuntu/sim_worlds", 1)
+
+    try:
+        # Remove stale file on host before requesting capture.
+        try:
+            import os as _os
+            if _os.path.exists(host_path):
+                _os.remove(host_path)
+        except Exception:
+            pass
+
+        isaac = get_isaac_connection()
+        result = isaac.send_command(
+            "capture_viewport",
+            {"output_path": output_path, "width": width, "height": height},
+        )
+
+        # Extension schedules the async capture and returns immediately with
+        # status="capturing". Poll the host-side file path (shared volume)
+        # until the PNG appears — this doesn't block Isaac Sim's event loop.
+        if result.get("status") not in ("success", "capturing"):
+            error_msg = result.get("message", "Unknown error from extension")
+            logger.error(f"capture_viewport extension error: {error_msg}")
+            return f"Error capturing viewport: {error_msg}"
+
+        deadline = _time.monotonic() + 12.0
+        while _time.monotonic() < deadline:
+            _time.sleep(0.2)
+            try:
+                import os as _os
+                if _os.path.exists(host_path) and _os.path.getsize(host_path) > 1000:
+                    break
+            except Exception:
+                pass
+        else:
+            return f"Capture timed out — file not found at {host_path}"
+
+        with open(host_path, "rb") as fh:
+            png_bytes = fh.read()
+
+        return Image(data=png_bytes, format="png")
+
+    except Exception as e:
+        logger.error(f"Error in capture_viewport: {str(e)}")
+        return f"Error capturing viewport: {str(e)}"
+
+
 # Main execution
 
 

@@ -24,6 +24,7 @@ from isaac_sim_mcp_extension.scene.scene_manager import SceneManager
 from isaac_sim_mcp_extension.scene.stage_loader import StageLoader
 from isaac_sim_mcp_extension.server.command_dispatcher import CommandDispatcher
 from isaac_sim_mcp_extension.server.socket_server import SocketServer
+from isaac_sim_mcp_extension.viewport_capture import ViewportCapture
 
 if _sys.getrecursionlimit() < 10000:
     _sys.setrecursionlimit(10000)
@@ -48,6 +49,7 @@ class MCPExtension(omni.ext.IExt):
         self._asset_generator = AssetGenerator(self._state)
         self._asset_loader = AssetLoader()
         self._stage_loader = StageLoader()
+        self._viewport_capture = ViewportCapture()
 
     def on_startup(self, ext_id: str) -> None:
         self.ext_id = ext_id
@@ -104,6 +106,9 @@ class MCPExtension(omni.ext.IExt):
         # Stage loading APIs
         self._dispatcher.register("load_stage_from_path", self._stage_loader.open_stage_from_path)
         self._dispatcher.register("load_usd_reference_from_path", self._stage_loader.load_reference_from_path)
+
+        # Viewport capture API
+        self._dispatcher.register("capture_viewport", self._viewport_capture.capture_viewport)
 
     def execute_command(self, command: Dict[str, Any]) -> Dict[str, Any]:
         """Dispatch command through validated command dispatcher.
