@@ -263,12 +263,14 @@ _nav_robot_prim_path: str = "/G1"
 _nav_status: str = "idle"
 _nav_last_error: str | None = None
 
-_DEFAULT_OBSTACLE_BOXES: tuple[tuple[float, float, float, float], ...] = (
-    (-2.5, -2.0, 1.5, 1.0),
-    (1.8, -0.2, 1.2, 1.8),
-    (0.0, 2.4, 2.0, 1.0),
-    (3.2, 2.5, 1.0, 1.0),
-)
+_DEFAULT_OBSTACLE_BOXES: tuple[tuple[float, float, float, float], ...] = ()
+
+# Multi-waypoint sequence state
+_nav_seq_active: bool = False
+_nav_seq_index: int = 0
+_nav_seq_total: int = 0
+_nav_seq_thread: threading.Thread | None = None
+_nav_seq_stop: threading.Event = threading.Event()
 
 
 def get_isaac_connection():
@@ -278,14 +280,16 @@ def get_isaac_connection():
     # If we have an existing connection, check if it's still valid
     if _isaac_connection is not None:
         try:
-
+            sock = _isaac_connection.sock
+            if sock is None or sock.fileno() == -1:
+                raise OSError("Socket is closed")
             return _isaac_connection
         except Exception as e:
             # Connection is dead, close it and create a new one
             logger.warning(f"Existing connection is no longer valid: {str(e)}")
             try:
                 _isaac_connection.disconnect()
-            except:
+            except Exception:
                 pass
             _isaac_connection = None
 
@@ -342,7 +346,7 @@ def get_scene_info(ctx: Context) -> str:
 def create_physics_scene(
     objects: List[Dict[str, Any]] = [],
     floor: bool = True,
-    gravity: List[float] = [0,  -0.981, 0],
+    gravity: List[float] = [0, 0, -9.81],
     scene_name: str = "physics_scene",
     floor_type: str = "flat",
     roughness: float = 0.03,
@@ -358,7 +362,7 @@ def create_physics_scene(
         roughness: When floor_type="rough", height amplitude in meters (±roughness). Larger = rougher. default 0.03
         terrain_resolution: When floor_type="rough", grid cell size in meters. Smaller = finer bumps. default 0.25
         terrain_seed: When floor_type="rough", random seed for terrain pattern. default 42
-        gravity: The gravity vector. Default is [0, 0, -981.0] (cm/s^2).
+        gravity: The gravity vector. Default is [0, 0, -9.81] (m/s², Z-down).
         scene_name: The name of the scene. default is "physics_scene"
 
     Returns:
@@ -872,7 +876,7 @@ def transform(
 # Pre-trained Policy Execution Tools
 # ============================================================================
 
-@mcp.tool("load_policy")
+# @mcp.tool("load_policy")  # Legacy — superseded by start_g1_policy_walk
 def load_policy(
     policy_path: str,
     robot_prim_path: str = "/G1"
@@ -1136,7 +1140,7 @@ def step_simulation(num_steps: int = 1, render: bool = True) -> str:
         return f"Error stepping simulation: {str(e)}"
 
 
-@mcp.tool("run_policy_loop")
+# @mcp.tool("run_policy_loop")  # Legacy — superseded by start_g1_policy_walk
 def run_policy_loop(
     robot_prim_path: str = "/G1",
     num_steps: int = 100,
@@ -1196,9 +1200,11 @@ def run_policy_loop(
         return f"Error running policy loop: {str(e)}"
 
 
+DEFAULT_POLICY_PATH = "/home/workspace/exported/g1_nav_flat_from_rough_1450_jit.pt"
+
 @mcp.tool("start_g1_policy_walk")
 def start_g1_policy_walk(
-    policy_path: str,
+    policy_path: str = DEFAULT_POLICY_PATH,
     robot_prim_path: str = "/G1",
     target_velocity: float = 0.5,
     deterministic: bool = True
@@ -1362,6 +1368,108 @@ def load_usd_reference_from_path(usd_path: str, prim_path: str) -> Dict[str, Any
 # -------------------------------------------------------------------------
 
 
+def _start_nav_to(
+    target_xy: tuple,
+    robot_prim_path: str = "/G1",
+    arrival_threshold: float = 0.5,
+    obstacle_boxes: List[List[float]] | None = None,
+    keep_existing_markers: bool = False,
+) -> str:
+    """Internal helper: plan A* path, place markers, start WaypointFollower.
+
+    Shared by navigate_to and navigate_waypoints. Returns a status string.
+    Caller must NOT hold _nav_state_lock.
+    """
+    global _nav_follower, _nav_target, _nav_arrival_threshold, _nav_robot_prim_path, _nav_status, _nav_last_error
+
+    try:
+        target_x = float(target_xy[0])
+        target_y = float(target_xy[1])
+
+        isaac = get_isaac_connection()
+        executor = IsaacSimExecutor(isaac, _nav_lock, robot_prim_path=robot_prim_path)
+        current_xy, _ = executor.get_pose()
+    except Exception as e:
+        return f"Error starting navigation: {e}"
+
+    boxes = obstacle_boxes if obstacle_boxes is not None else [list(box) for box in _DEFAULT_OBSTACLE_BOXES]
+    if any(len(box) < 4 for box in boxes):
+        return "Error starting navigation: each obstacle box must be [cx, cy, sx, sy]"
+
+    grid = OccupancyGrid.from_scene_boxes(boxes=boxes, map_size_m=20.0, resolution_m=0.1)
+    grid.inflate(radius_m=0.5)
+    planner = AStarPlanner(grid)
+    waypoints = planner.plan((float(current_xy[0]), float(current_xy[1])), (target_x, target_y))
+    if not waypoints:
+        start_cell = grid.world_to_grid(float(current_xy[0]), float(current_xy[1]))
+        goal_cell  = grid.world_to_grid(target_x, target_y)
+        detail = (
+            f"start={float(current_xy[0]):.2f},{float(current_xy[1]):.2f} "
+            f"(cell occupied={grid.is_occupied(*start_cell)}), "
+            f"goal={target_x:.2f},{target_y:.2f} "
+            f"(cell occupied={grid.is_occupied(*goal_cell)}), "
+            f"obstacles={len(boxes)}"
+        )
+        return f"Error starting navigation: no path found to target — {detail}"
+
+    # Visualize path waypoints under /World/NavWaypoints (small dots, cleared per segment
+    # unless keep_existing_markers=True). Corner markers from navigate_waypoints live under
+    # /World/Waypoints — a separate prim tree — so they are never affected here.
+    try:
+        points_repr = ", ".join(f"({float(wx):.3f}, {float(wy):.3f})" for wx, wy in waypoints)
+        delete_block = (
+            ""
+            if keep_existing_markers else
+            "prim = stage.GetPrimAtPath(parent_path)\n"
+            "if prim:\n"
+            "    stage.RemovePrim(parent_path)\n"
+        )
+        code = (
+            "import omni.usd\n"
+            "from pxr import UsdGeom, Gf, Vt\n"
+            "stage = omni.usd.get_context().get_stage()\n"
+            "parent_path = '/World/NavWaypoints'\n"
+            + delete_block
+            + "UsdGeom.Xform.Define(stage, parent_path)\n"
+            f"points = [{points_repr}]\n"
+            "for i, (wx, wy) in enumerate(points):\n"
+            "    ppath = f'{parent_path}/wp_{i}'\n"
+            "    sphere = UsdGeom.Sphere.Define(stage, ppath)\n"
+            "    sphere.GetRadiusAttr().Set(0.1)\n"
+            "    UsdGeom.Xformable(sphere.GetPrim()).AddTranslateOp().Set(Gf.Vec3d(wx, wy, 0.1))\n"
+            "    sphere.GetDisplayColorAttr().Set(Vt.Vec3fArray([Gf.Vec3f(0.3, 0.3, 1.0)]))\n"
+        )
+        isaac.send_command("execute_script", {"code": code})
+    except Exception as marker_err:
+        logger.warning(f"Failed to create navigation waypoint markers: {marker_err}")
+
+    new_follower = WaypointFollower(executor=executor, arrival_dist_m=arrival_threshold)
+
+    def _on_status_change(status: str) -> None:
+        global _nav_follower, _nav_status, _nav_last_error
+        with _nav_state_lock:
+            _nav_status = status
+            _nav_last_error = new_follower.last_error
+            if status in ("arrived", "failed", "idle"):
+                _nav_follower = None
+
+    with _nav_state_lock:
+        if _nav_follower is not None:
+            _nav_follower.stop()
+        _nav_follower = new_follower
+        _nav_target = [target_x, target_y]
+        _nav_arrival_threshold = float(arrival_threshold)
+        _nav_robot_prim_path = robot_prim_path
+        _nav_status = "navigating"
+        _nav_last_error = None
+
+    new_follower.follow(waypoints, on_status_change=_on_status_change)
+    return (
+        f"Navigation started toward [{target_x:.2f}, {target_y:.2f}] with "
+        f"{len(waypoints)} waypoints. Call get_navigation_status() to monitor."
+    )
+
+
 @mcp.tool("navigate_to")
 def navigate_to(
     target_position: List[float],
@@ -1369,112 +1477,180 @@ def navigate_to(
     policy_path: str = "",
     arrival_threshold: float = 0.5,
     obstacle_boxes: List[List[float]] | None = None,
+    keep_existing_markers: bool = False,
 ) -> str:
     """Start MCP-side A* navigation toward a target XY position.
 
     The planner runs in the MCP server and sends velocity commands through
     set_velocity_command in a background thread. Returns immediately (non-blocking).
+
+    Args:
+        target_position: [x, y] target in world meters.
+        robot_prim_path: USD prim path of the robot (default /G1).
+        policy_path: Optional path to .pt policy file; only needed if
+            start_g1_policy_walk has not already been called.
+        arrival_threshold: Distance (m) at which the robot is considered arrived.
+        obstacle_boxes: List of [cx, cy, sx, sy] obstacle boxes. Defaults to empty
+            (no obstacles assumed). Pass explicit boxes for cluttered environments.
+        keep_existing_markers: If True, skip deletion of /World/NavWaypoints before
+            placing new path markers. Useful when called from navigate_waypoints to
+            avoid interfering with user-placed corner markers.
     """
-    global _nav_follower, _nav_target, _nav_arrival_threshold, _nav_robot_prim_path, _nav_status, _nav_last_error
     try:
         if len(target_position) < 2:
             return "Error starting navigation: target_position must contain at least [x, y]"
 
-        target_x = float(target_position[0])
-        target_y = float(target_position[1])
-
         if policy_path:
-            # Start locomotion callback if the caller provided a policy.
             start_result = start_g1_policy_walk(policy_path=policy_path, robot_prim_path=robot_prim_path)
             if isinstance(start_result, str) and start_result.startswith("Error"):
                 return f"Error starting navigation: {start_result}"
 
-        isaac = get_isaac_connection()
-        executor = IsaacSimExecutor(isaac, _nav_lock, robot_prim_path=robot_prim_path)
-        current_xy, _ = executor.get_pose()
-
-        boxes = obstacle_boxes if obstacle_boxes is not None else [list(box) for box in _DEFAULT_OBSTACLE_BOXES]
-        if any(len(box) < 4 for box in boxes):
-            return "Error starting navigation: each obstacle box must be [cx, cy, sx, sy]"
-
-        grid = OccupancyGrid.from_scene_boxes(boxes=boxes, map_size_m=20.0, resolution_m=0.1)
-        grid.inflate(radius_m=0.5)
-        planner = AStarPlanner(grid)
-        waypoints = planner.plan((float(current_xy[0]), float(current_xy[1])), (target_x, target_y))
-        if not waypoints:
-            start_cell = grid.world_to_grid(float(current_xy[0]), float(current_xy[1]))
-            goal_cell  = grid.world_to_grid(target_x, target_y)
-            detail = (
-                f"start={float(current_xy[0]):.2f},{float(current_xy[1]):.2f} "
-                f"(cell occupied={grid.is_occupied(*start_cell)}), "
-                f"goal={target_x:.2f},{target_y:.2f} "
-                f"(cell occupied={grid.is_occupied(*goal_cell)}), "
-                f"obstacles={len(boxes)}"
-            )
-            return f"Error starting navigation: no path found to target — {detail}"
-
-        # ------------------------------------------------------------------
-        # Optional: visualize waypoints in the Isaac Sim stage.
-        # Creates small sphere markers under /World/NavWaypoints so users can
-        # see the planned path. Failure to create markers should not break nav.
-        # ------------------------------------------------------------------
-        try:
-            points_repr = ", ".join(f"({float(wx):.3f}, {float(wy):.3f})" for wx, wy in waypoints)
-            code = (
-                "import omni.usd\n"
-                "from pxr import UsdGeom, Gf\n"
-                "stage = omni.usd.get_context().get_stage()\n"
-                "parent_path = '/World/NavWaypoints'\n"
-                "prim = stage.GetPrimAtPath(parent_path)\n"
-                "if prim:\n"
-                "    stage.RemovePrim(parent_path)\n"
-                "parent = UsdGeom.Xform.Define(stage, parent_path)\n"
-                f"points = [{points_repr}]\n"
-                "for i, (wx, wy) in enumerate(points):\n"
-                "    prim_path = f'{parent_path}/wp_{i}'\n"
-                "    sphere = UsdGeom.Sphere.Define(stage, prim_path)\n"
-                "    sphere.CreateRadiusAttr(0.15)\n"
-                "    xform = UsdGeom.Xformable(sphere.GetPrim())\n"
-                "    xform.AddTranslateOp().Set(Gf.Vec3d(wx, wy, 0.05))\n"
-            )
-            isaac.send_command("execute_script", {"code": code})
-        except Exception as marker_err:
-            logger.warning(f"Failed to create navigation waypoint markers: {marker_err}")
-
-        new_follower = WaypointFollower(executor=executor, arrival_dist_m=arrival_threshold)
-
-        def _on_status_change(status: str) -> None:
-            global _nav_follower, _nav_status, _nav_last_error
-            with _nav_state_lock:
-                _nav_status = status
-                _nav_last_error = new_follower.last_error
-                if status in ("arrived", "failed", "idle"):
-                    _nav_follower = None
-
-        with _nav_state_lock:
-            if _nav_follower is not None:
-                _nav_follower.stop()
-            _nav_follower = new_follower
-            _nav_target = [target_x, target_y]
-            _nav_arrival_threshold = float(arrival_threshold)
-            _nav_robot_prim_path = robot_prim_path
-            _nav_status = "navigating"
-            _nav_last_error = None
-
-        new_follower.follow(waypoints, on_status_change=_on_status_change)
-        return (
-            f"Navigation started toward [{target_x:.2f}, {target_y:.2f}] with "
-            f"{len(waypoints)} waypoints. Call get_navigation_status() to monitor."
+        return _start_nav_to(
+            target_xy=(target_position[0], target_position[1]),
+            robot_prim_path=robot_prim_path,
+            arrival_threshold=arrival_threshold,
+            obstacle_boxes=obstacle_boxes,
+            keep_existing_markers=keep_existing_markers,
         )
     except Exception as e:
         logger.error(f"Error in navigate_to: {str(e)}")
         return f"Error starting navigation: {str(e)}"
 
 
+@mcp.tool("navigate_waypoints")
+def navigate_waypoints(
+    positions: List[List[float]],
+    robot_prim_path: str = "/G1",
+    policy_path: str = "",
+    arrival_threshold: float = 0.5,
+    visualize_corners: bool = True,
+) -> str:
+    """Navigate the robot sequentially through a list of XY positions.
+
+    Launches a background daemon thread that drives the robot through each position
+    in order using A* planning. Returns immediately (non-blocking).
+
+    Corner markers are placed at /World/Waypoints/wp_N (persistent across segments,
+    radius=0.2m, Z=0.3m). Per-segment path dots are placed at /World/NavWaypoints
+    (overwritten each segment). These two prim trees never interfere.
+
+    Args:
+        positions: Ordered list of [x, y] target positions.
+        robot_prim_path: USD prim path of the robot (default /G1).
+        policy_path: Optional path to .pt policy file; only needed if
+            start_g1_policy_walk has not already been called.
+        arrival_threshold: Distance (m) at which each waypoint is considered reached.
+        visualize_corners: If True, place persistent sphere markers at each corner
+            under /World/Waypoints/wp_N.
+
+    Poll get_navigation_status() for seq_index / seq_total progress.
+    Call stop_navigation() to abort the sequence.
+    """
+    global _nav_seq_active, _nav_seq_index, _nav_seq_total, _nav_seq_thread, _nav_seq_stop
+
+    try:
+        if not positions or len(positions) < 1:
+            return "Error: positions list must not be empty"
+        if any(len(p) < 2 for p in positions):
+            return "Error: each position must contain at least [x, y]"
+
+        if policy_path:
+            start_result = start_g1_policy_walk(policy_path=policy_path, robot_prim_path=robot_prim_path)
+            if isinstance(start_result, str) and start_result.startswith("Error"):
+                return f"Error starting navigate_waypoints: {start_result}"
+
+        # Place persistent corner markers at /World/Waypoints (separate from NavWaypoints)
+        if visualize_corners:
+            try:
+                isaac = get_isaac_connection()
+                pts_repr = ", ".join(f"({float(p[0]):.3f}, {float(p[1]):.3f})" for p in positions)
+                corner_code = (
+                    "import omni.usd\n"
+                    "from pxr import UsdGeom, Gf, Vt\n"
+                    "stage = omni.usd.get_context().get_stage()\n"
+                    "parent_path = '/World/Waypoints'\n"
+                    "existing = stage.GetPrimAtPath(parent_path)\n"
+                    "if existing.IsValid(): stage.RemovePrim(parent_path)\n"
+                    "UsdGeom.Xform.Define(stage, parent_path)\n"
+                    f"corners = [{pts_repr}]\n"
+                    "colors = [(1,1,0),(1,0.5,0),(0,1,0),(0,0.5,1)]\n"
+                    "for i, (cx, cy) in enumerate(corners):\n"
+                    "    color = colors[i % len(colors)]\n"
+                    "    ppath = f'{parent_path}/wp_{i}'\n"
+                    "    sphere = UsdGeom.Sphere.Define(stage, ppath)\n"
+                    "    sphere.GetRadiusAttr().Set(0.25)\n"
+                    "    UsdGeom.Xformable(sphere.GetPrim()).AddTranslateOp().Set(Gf.Vec3d(cx, cy, 0.3))\n"
+                    "    sphere.GetDisplayColorAttr().Set(Vt.Vec3fArray([Gf.Vec3f(*color)]))\n"
+                    "print(f'Created {len(corners)} corner markers')\n"
+                )
+                isaac.send_command("execute_script", {"code": corner_code})
+            except Exception as ce:
+                logger.warning(f"Failed to create corner markers: {ce}")
+
+        # Cancel any existing sequence before starting a new one
+        _nav_seq_stop.set()
+        _nav_seq_stop.clear()
+        _nav_seq_active = True
+        _nav_seq_index = 0
+        _nav_seq_total = len(positions)
+
+        def _sequence_thread() -> None:
+            global _nav_seq_active, _nav_seq_index, _nav_status
+            try:
+                for idx, pos in enumerate(positions):
+                    if _nav_seq_stop.is_set():
+                        break
+                    _nav_seq_index = idx
+                    try:
+                        result = _start_nav_to(
+                            target_xy=(pos[0], pos[1]),
+                            robot_prim_path=robot_prim_path,
+                            arrival_threshold=arrival_threshold,
+                            keep_existing_markers=False,
+                        )
+                    except Exception as seg_exc:
+                        result = f"Error: {seg_exc}"
+                    if result.startswith("Error"):
+                        logger.error(f"navigate_waypoints segment {idx} failed: {result}")
+                        with _nav_state_lock:
+                            _nav_status = "failed"
+                        break
+                    # Wait for this segment to complete
+                    while not _nav_seq_stop.is_set():
+                        with _nav_state_lock:
+                            seg_status = _nav_status
+                        if seg_status in ("arrived", "failed", "idle"):
+                            if seg_status == "failed":
+                                return
+                            break
+                        time.sleep(0.5)
+                else:
+                    # All waypoints completed without stop
+                    with _nav_state_lock:
+                        _nav_status = "arrived"
+            finally:
+                _nav_seq_active = False
+
+        _nav_seq_thread = threading.Thread(
+            target=_sequence_thread,
+            daemon=True,
+            name="mcp-nav-sequence",
+        )
+        _nav_seq_thread.start()
+
+        return (
+            f"Waypoint sequence started: {len(positions)} positions. "
+            f"Poll get_navigation_status() for seq_index/seq_total progress."
+        )
+    except Exception as e:
+        logger.error(f"Error in navigate_waypoints: {str(e)}")
+        return f"Error starting navigate_waypoints: {str(e)}"
+
+
 @mcp.tool("stop_navigation")
 def stop_navigation() -> str:
-    """Stop active MCP-side navigation and zero velocity commands."""
-    global _nav_follower, _nav_status, _nav_last_error
+    """Stop active MCP-side navigation (single target or waypoint sequence) and zero velocity."""
+    global _nav_follower, _nav_status, _nav_last_error, _nav_seq_active, _nav_seq_stop
     try:
         with _nav_state_lock:
             follower = _nav_follower
@@ -1482,6 +1658,10 @@ def stop_navigation() -> str:
             _nav_follower = None
             _nav_status = "idle"
             _nav_last_error = None
+
+        # Also cancel any running waypoint sequence
+        _nav_seq_stop.set()
+        _nav_seq_active = False
 
         if follower is not None:
             follower.stop()
@@ -1494,7 +1674,8 @@ def stop_navigation() -> str:
 
 @mcp.tool("get_navigation_status")
 def get_navigation_status() -> str:
-    """Return current MCP-side navigation state."""
+    """Return current MCP-side navigation state including waypoint sequence progress."""
+    global _nav_seq_active, _nav_seq_index, _nav_seq_total
     try:
         with _nav_state_lock:
             nav_status = _nav_status
@@ -1509,6 +1690,9 @@ def get_navigation_status() -> str:
             "target_position": nav_target,
             "arrival_threshold": nav_threshold,
             "robot_prim_path": robot_prim_path,
+            "seq_active": _nav_seq_active,
+            "seq_index": _nav_seq_index,
+            "seq_total": _nav_seq_total,
         }
         if nav_error:
             nav_info["last_error"] = nav_error

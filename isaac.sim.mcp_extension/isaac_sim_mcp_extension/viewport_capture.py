@@ -85,7 +85,13 @@ class ViewportCapture:
                 rgb.attach([rp])
                 await rep.orchestrator.step_async(rt_subframes=4)
                 data = rgb.get_data()
-                # data is RGBA uint8 numpy array of shape (H, W, 4).
+                # In Isaac Sim 5.x replicator returns a dict with a "data" key
+                # containing a flat uint8 array; older builds return the array directly.
+                if isinstance(data, dict):
+                    data = data["data"]
+                # Reshape flat 1-D RGBA buffer → (H, W, 4)
+                if data.ndim == 1:
+                    data = data.reshape(_height, _width, 4)
                 # Save as RGB PNG using PIL (ships with Isaac Sim / OV Python).
                 from PIL import Image as PILImage  # type: ignore[import]
                 PILImage.fromarray(data[:, :, :3]).save(_out)

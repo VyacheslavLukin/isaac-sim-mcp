@@ -17,13 +17,15 @@ Isaac Sim runs in Docker as user 1234. Policy files must be in the Docker named 
 - Always verify connection first with `get_scene_info` before any other call
 - `get_scene_info` returns `{"status": "success", "message": "pong", "assets_root_path": "..."}`
 
-## Policy Files (Confirmed Working)
+## Policy Files (Confirmed Working - updated 2026-04-02)
 
 | File | Container Path | obs_dim | act_dim | Status |
 |------|---------------|---------|---------|--------|
-| g1_flat_policy_4498.pt | `/home/workspace/exported/g1_flat_policy_4498.pt` | 123 | 37 | Works with extension |
-| g1_flat_policy_12100.pt | `/home/workspace/exported/g1_flat_policy_12100.pt` | 123 | 37 | Available |
+| g1_nav_flat_from_rough_1450_jit.pt | `/home/workspace/exported/g1_nav_flat_from_rough_1450_jit.pt` | 123 | 37 | **Works** - confirmed 2026-04-02 square nav |
+| g1_nav_flat_policy_1550_best.pt | `/home/workspace/exported/g1_nav_flat_policy_1550_best.pt` | 123 | 37 | Available |
 | g1_rough_policy_1450.pt | `/home/workspace/exported/g1_rough_policy_1450.pt` | **310** | 37 | **Incompatible** (see below) |
+
+Note: g1_flat_policy_4498.pt and g1_flat_policy_12100.pt are NO LONGER in the Docker volume as of 2026-04-02.
 
 ## Rough Terrain Policy (g1_rough_policy_1450.pt) - Status: PATCHED BUT NEEDS RESTART
 

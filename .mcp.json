@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "isaac-sim": {
+      "command": "uv",
+      "args": [
+        "run",
+        "/home/ubuntu/isaac-sim-mcp/isaac_mcp/server.py"
+      ],
+      "env": {}
+    }
+  }
+}
