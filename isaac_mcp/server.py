@@ -31,7 +31,7 @@ import json
 import asyncio
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Dict, Any, List
 import os
@@ -56,6 +56,10 @@ class IsaacConnection:
     host: str
     port: int
     sock: socket.socket = None  # Changed from 'socket' to 'sock' to avoid naming conflict
+    # Serializes a full send+receive transaction so concurrent callers (e.g. the
+    # background navigation worker and the main thread) cannot interleave on the
+    # shared socket and read each other's responses.
+    _io_lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def connect(self) -> bool:
         """Connect to the Isaac addon socket server"""
@@ -154,6 +158,9 @@ class IsaacConnection:
             "params": params or {}
         }
 
+        # Hold the lock across the entire send+receive so request/response pairs
+        # stay matched even when called concurrently from multiple threads.
+        self._io_lock.acquire()
         try:
             # Log the command being sent
             logger.info(
@@ -209,6 +216,8 @@ class IsaacConnection:
             # Don't try to reconnect here - let the get_isaac_connection handle reconnection
             self.sock = None
             raise Exception(f"Communication error with Isaac: {str(e)}")
+        finally:
+            self._io_lock.release()
 
 
 @asynccontextmanager
