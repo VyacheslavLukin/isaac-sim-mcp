@@ -1533,6 +1533,7 @@ def navigate_waypoints(
     policy_path: str = "",
     arrival_threshold: float = 0.5,
     visualize_corners: bool = True,
+    obstacle_boxes: List[List[float]] | None = None,
 ) -> str:
     """Navigate the robot sequentially through a list of XY positions.
 
@@ -1551,6 +1552,10 @@ def navigate_waypoints(
         arrival_threshold: Distance (m) at which each waypoint is considered reached.
         visualize_corners: If True, place persistent sphere markers at each corner
             under /World/Waypoints/wp_N.
+        obstacle_boxes: List of [cx, cy, sx, sy] obstacle boxes applied to EVERY
+            segment. Each segment re-plans an A* path from the robot's current pose
+            around these obstacles, so a mid-route recovery cannot beeline through
+            them. Defaults to no obstacles.
 
     Poll get_navigation_status() for seq_index / seq_total progress.
     Call stop_navigation() to abort the sequence.
@@ -1615,6 +1620,7 @@ def navigate_waypoints(
                             target_xy=(pos[0], pos[1]),
                             robot_prim_path=robot_prim_path,
                             arrival_threshold=arrival_threshold,
+                            obstacle_boxes=obstacle_boxes,
                             keep_existing_markers=False,
                         )
                     except Exception as seg_exc:

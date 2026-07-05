@@ -24,9 +24,10 @@ class WaypointFollower:
         k_ang: float = 1.5,
         max_vx: float = 1.0,
         min_vx: float = 0.0,
-        max_vy: float = 0.5,
-        max_yaw: float = 1.0,
+        max_vy: float = 0.35,
+        max_yaw: float = 0.8,
         control_period_s: float = 0.1,
+        heading_gate_deg: float = 55.0,
     ):
         self._executor = executor
         self._arrival_dist_m = arrival_dist_m
@@ -43,6 +44,11 @@ class WaypointFollower:
         self._min_vx_when_far = 0.25
         self._far_threshold_m = 1.0
         self._control_period_s = control_period_s
+        # H.2: Heading gate. Translation (vx, vy) is ramped down as the heading error grows and
+        # fully suppressed beyond this angle, so the robot turns to face the target BEFORE walking
+        # instead of strafing sideways while yawing at full rate — the combination that tips the
+        # flat command-tracking policy at tight detours.
+        self._heading_gate_rad = math.radians(heading_gate_deg)
 
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -123,12 +129,19 @@ class WaypointFollower:
                 fwd = cy * dx + sy * dy
                 lat = -sy * dx + cy * dy
 
-                vx = self._clamp(self._k_lin * fwd, self._min_vx, self._max_vx)
-                # When far from goal, enforce minimum forward so robot walks while turning
-                if goal_dist > self._far_threshold_m and vx < self._min_vx_when_far:
-                    vx = self._min_vx_when_far
-                vy = self._clamp(self._k_lat * lat, -self._max_vy, self._max_vy)
+                # Yaw always turns toward the target waypoint.
                 wz = self._clamp(self._k_ang * heading_error, -self._max_yaw, self._max_yaw)
+
+                # Heading gate: 1.0 when facing the target, ramping linearly to 0.0 at the gate
+                # angle (turn in place beyond it). Suppresses simultaneous strafe + yaw.
+                gate = self._clamp(1.0 - abs(heading_error) / self._heading_gate_rad, 0.0, 1.0)
+
+                vx = self._clamp(self._k_lin * fwd, self._min_vx, self._max_vx) * gate
+                # When far from goal AND roughly aligned, enforce a minimum forward speed so the
+                # robot walks while making small heading corrections (not just turning in place).
+                if goal_dist > self._far_threshold_m and gate > 0.5 and vx < self._min_vx_when_far:
+                    vx = self._min_vx_when_far
+                vy = self._clamp(self._k_lat * lat, -self._max_vy, self._max_vy) * gate
                 self._executor.set_velocity_command(vx, vy, wz)
                 time.sleep(self._control_period_s)
 

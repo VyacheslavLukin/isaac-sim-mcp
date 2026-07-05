@@ -33,6 +33,17 @@ ACTION_SCALE = 0.5
 # output and robot command; we always use the robot's DOF order as-is.
 
 
+def _yaw_from_quat(quat: np.ndarray) -> float:
+    """Extract yaw (rotation about world +Z) from a (w, x, y, z) quaternion."""
+    w, x, y, z = float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])
+    return float(np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z)))
+
+
+def _upright_quat_from_yaw(yaw: float) -> np.ndarray:
+    """Build an upright (zero roll/pitch) (w, x, y, z) quaternion for the given yaw."""
+    return np.array([np.cos(yaw / 2.0), 0.0, 0.0, np.sin(yaw / 2.0)])
+
+
 def _build_default_joint_pos(dof_names: List[str]) -> np.ndarray:
     """Build G1_CFG.init_state.joint_pos defaults in robot DOF order.
 
@@ -168,6 +179,8 @@ class PolicyRunner:
             self._state.policy.walk_deterministic = deterministic
             self._state.policy.walk_step_count = 0
             self._state.policy.walk_initialized = False
+            self._state.policy.walk_fall_count = 0
+            self._state.policy.walk_last_fall_xy = None
 
             robot = self._state.policy.robot_articulation
             carb.log_info("[WALK] Got robot articulation, reading dof_names...")
@@ -336,18 +349,26 @@ class PolicyRunner:
                         ArticulationAction(joint_positions=target_positions)
                     )
 
-                    # --- Fall detection and reset ---
+                    # --- Fall detection and reset (H.1: reset IN PLACE, not to spawn origin) ---
                     base_pos = np.array(state_result["state"]["base_position"])
                     if float(base_pos[2]) < 0.3:
+                        # Recover at the robot's CURRENT XY (where it fell), preserving its
+                        # yaw heading, so an active navigation route is not scrambled by a
+                        # teleport back to the spawn point. Only roll/pitch/height are reset.
+                        fall_x, fall_y = float(base_pos[0]), float(base_pos[1])
+                        fall_yaw = _yaw_from_quat(np.array(state_result["state"]["base_orientation"]))
+                        self._state.policy.walk_fall_count += 1
+                        self._state.policy.walk_last_fall_xy = (fall_x, fall_y)
                         carb.log_warn(
                             f"[FALL] step={self._state.policy.walk_step_count} "
-                            f"z={float(base_pos[2]):.3f}m — resetting"
+                            f"z={float(base_pos[2]):.3f}m at ({fall_x:.2f},{fall_y:.2f}) "
+                            f"— resetting in place (fall #{self._state.policy.walk_fall_count})"
                         )
-                        fall_terrain_z = self._scene_manager.get_terrain_height_at(reset_x, reset_y)
+                        fall_terrain_z = self._scene_manager.get_terrain_height_at(fall_x, fall_y)
                         fall_z = fall_terrain_z + G1_STANDING_BASE_HEIGHT
                         robot.set_world_pose(
-                            position=np.array([reset_x, reset_y, fall_z]),
-                            orientation=np.array([1.0, 0.0, 0.0, 0.0]),
+                            position=np.array([fall_x, fall_y, fall_z]),
+                            orientation=_upright_quat_from_yaw(fall_yaw),
                         )
                         robot.set_joint_positions(self._state.policy.walk_default_joint_pos)
                         robot.set_joint_velocities(np.zeros(len(self._state.policy.walk_default_joint_pos)))

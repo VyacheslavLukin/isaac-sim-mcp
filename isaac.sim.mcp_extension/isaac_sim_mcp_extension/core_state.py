@@ -25,6 +25,9 @@ class PolicyState:
     walk_default_joint_pos: Any = None
     walk_policy_to_robot: Any = None
     walk_robot_to_policy: Any = None
+    # Fall/recovery telemetry (H.1): count of auto-recoveries and last fall XY.
+    walk_fall_count: int = 0
+    walk_last_fall_xy: Any = None
 
 
 @dataclass
