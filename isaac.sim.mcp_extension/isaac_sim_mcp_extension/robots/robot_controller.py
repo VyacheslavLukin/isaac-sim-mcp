@@ -105,13 +105,28 @@ class RobotController:
             if base_position is None:
                 base_position = [0.0, 0.0, 0.8]
 
-            stage = omni.usd.get_context().get_stage()
-            robot_prim = stage.GetPrimAtPath(robot_prim_path)
-            if robot_prim.IsValid():
-                xformable = UsdGeom.Xformable(robot_prim)
-                xformable.ClearXformOpOrder()
-                translate_op = xformable.AddTranslateOp()
-                translate_op.Set(Gf.Vec3d(float(base_position[0]), float(base_position[1]), float(base_position[2])))
+            # Prefer the physics API for a live articulation: under a running sim PhysX
+            # owns the root pose, so writing a USD Xform op is a silent no-op. set_world_pose
+            # writes PhysX state directly (same API the fall-recovery path uses). Fall back to
+            # the USD Xform only when no articulation is loaded (e.g. sim not started yet).
+            articulation = self._state.policy.robot_articulation
+            if articulation is not None:
+                articulation.set_world_pose(
+                    position=np.array([float(base_position[0]), float(base_position[1]), float(base_position[2])])
+                )
+                try:
+                    articulation.set_linear_velocity(np.zeros(3))
+                    articulation.set_angular_velocity(np.zeros(3))
+                except Exception:
+                    pass
+            else:
+                stage = omni.usd.get_context().get_stage()
+                robot_prim = stage.GetPrimAtPath(robot_prim_path)
+                if robot_prim.IsValid():
+                    xformable = UsdGeom.Xformable(robot_prim)
+                    xformable.ClearXformOpOrder()
+                    translate_op = xformable.AddTranslateOp()
+                    translate_op.Set(Gf.Vec3d(float(base_position[0]), float(base_position[1]), float(base_position[2])))
 
             if joint_positions is not None and self._state.policy.controller is not None:
                 self._state.policy.controller.apply_action(ArticulationAction(joint_positions=np.array(joint_positions)))

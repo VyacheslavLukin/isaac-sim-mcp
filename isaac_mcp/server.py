@@ -1215,7 +1215,7 @@ DEFAULT_POLICY_PATH = "/home/workspace/exported/g1_nav_flat_from_rough_1450_jit.
 def start_g1_policy_walk(
     policy_path: str = DEFAULT_POLICY_PATH,
     robot_prim_path: str = "/G1",
-    target_velocity: float = 0.5,
+    target_velocity: float = 0.0,
     deterministic: bool = True
 ) -> str:
     """Start continuous policy-driven walking using a persistent callback.

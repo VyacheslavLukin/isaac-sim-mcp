@@ -41,7 +41,7 @@ class WaypointFollower:
         self._max_yaw = max_yaw
         # When far from goal, command at least this forward velocity so the robot walks while turning
         # instead of only turning in place (which can look like "not moving").
-        self._min_vx_when_far = 0.25
+        self._min_vx_when_far = 0.35
         self._far_threshold_m = 1.0
         self._control_period_s = control_period_s
         # H.2: Heading gate. Translation (vx, vy) is ramped down as the heading error grows and
@@ -139,7 +139,7 @@ class WaypointFollower:
                 vx = self._clamp(self._k_lin * fwd, self._min_vx, self._max_vx) * gate
                 # When far from goal AND roughly aligned, enforce a minimum forward speed so the
                 # robot walks while making small heading corrections (not just turning in place).
-                if goal_dist > self._far_threshold_m and gate > 0.5 and vx < self._min_vx_when_far:
+                if goal_dist > self._far_threshold_m and gate > 0.35 and vx < self._min_vx_when_far:
                     vx = self._min_vx_when_far
                 vy = self._clamp(self._k_lat * lat, -self._max_vy, self._max_vy) * gate
                 self._executor.set_velocity_command(vx, vy, wz)

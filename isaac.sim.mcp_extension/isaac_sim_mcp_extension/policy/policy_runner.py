@@ -147,7 +147,7 @@ class PolicyRunner:
         self,
         policy_path: str,
         robot_prim_path: str = "/G1",
-        target_velocity: float = 0.5,
+        target_velocity: float = 0.0,
         deterministic: bool = True,
     ) -> Dict[str, Any]:
         try:
