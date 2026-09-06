@@ -48,7 +48,17 @@ class ObservationBuilder:
                     wx = robot_x + cos_yaw * x_loc - sin_yaw * y_loc
                     wy = robot_y + sin_yaw * x_loc + cos_yaw * y_loc
                     hit = query.raycast_closest(carb.Float3(wx, wy, robot_z + 20.0), carb.Float3(0.0, 0.0, -1.0), 30.0)
-                    terrain_z = float(hit["position"][2]) if (hit and hit.get("hit")) else 0.0
+                    # The height scan is a *terrain* (heightfield) sensor: one Z per XY.
+                    # Vertical obstacles (walls) are out-of-distribution for it — reading a
+                    # wall's top face as "terrain" makes a rough-terrain policy think the
+                    # floor is wildly uneven and produces an unnatural, obstacle-stepping
+                    # gait. Mirror get_terrain_height_at: only accept ground-plane hits;
+                    # treat wall hits / self-hits as flat ground (terrain_z = 0.0).
+                    terrain_z = 0.0
+                    if hit and hit.get("hit"):
+                        hit_body = hit.get("rigidBody", "") or ""
+                        if ("/World/groundPlane" in hit_body) or ("/World/Ground" in hit_body):
+                            terrain_z = float(hit["position"][2])
                     # Match Isaac Lab: obs = (sensor_z - hit_z) - 0.5
                     heights.append(np.clip((robot_z - terrain_z) - 0.5, -1.0, 1.0))
             return np.array(heights, dtype=np.float32)
