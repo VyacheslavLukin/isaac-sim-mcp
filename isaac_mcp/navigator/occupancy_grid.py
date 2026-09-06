@@ -27,6 +27,8 @@ class OccupancyGrid:
         size_cells = max(1, int(round(map_size_m / resolution_m)))
         half = map_size_m * 0.5
         occupancy = cls(origin_xy=(-half, -half), resolution_m=resolution_m, size_cells=size_cells)
+        # Each box is [cx, cy, sx, sy]: centre plus FULL width and height in metres
+        # (footprint size, NOT half-extents). mark_box halves them internally.
         for box in boxes:
             cx, cy, sx, sy = box
             occupancy.mark_box(float(cx), float(cy), float(sx), float(sy))
@@ -45,6 +47,12 @@ class OccupancyGrid:
         return x, y
 
     def mark_box(self, cx: float, cy: float, sx: float, sy: float) -> None:
+        """Mark an axis-aligned box occupied.
+
+        (cx, cy) is the centre; sx, sy are the box's FULL width and height in
+        metres (footprint size, NOT half-extents) -- they are halved here to get
+        the extents from the centre.
+        """
         min_x = cx - sx * 0.5
         max_x = cx + sx * 0.5
         min_y = cy - sy * 0.5

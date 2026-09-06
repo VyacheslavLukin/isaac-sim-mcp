@@ -1403,7 +1403,11 @@ def _start_nav_to(
 
     boxes = obstacle_boxes if obstacle_boxes is not None else [list(box) for box in _DEFAULT_OBSTACLE_BOXES]
     if any(len(box) < 4 for box in boxes):
-        return "Error starting navigation: each obstacle box must be [cx, cy, sx, sy]"
+        return (
+            "Error starting navigation: each obstacle box must be "
+            "[cx, cy, sx, sy] where sx, sy are the FULL width and height "
+            "(footprint size in metres), not half-extents"
+        )
 
     grid = OccupancyGrid.from_scene_boxes(boxes=boxes, map_size_m=20.0, resolution_m=0.1)
     grid.inflate(radius_m=0.5)
@@ -1499,8 +1503,13 @@ def navigate_to(
         policy_path: Optional path to .pt policy file; only needed if
             start_g1_policy_walk has not already been called.
         arrival_threshold: Distance (m) at which the robot is considered arrived.
-        obstacle_boxes: List of [cx, cy, sx, sy] obstacle boxes. Defaults to empty
-            (no obstacles assumed). Pass explicit boxes for cluttered environments.
+        obstacle_boxes: List of [cx, cy, sx, sy] obstacle boxes, where (cx, cy) is
+            the box centre and sx, sy are its FULL width and height in metres (the
+            footprint size, NOT half-extents). For a wall built from a unit
+            UsdGeom.Cube scaled by (scale_x, scale_y), pass sx=scale_x, sy=scale_y.
+            The planner additionally inflates every box by a 0.5 m robot radius.
+            Defaults to empty (no obstacles assumed). Pass explicit boxes for
+            cluttered environments.
         keep_existing_markers: If True, skip deletion of /World/NavWaypoints before
             placing new path markers. Useful when called from navigate_waypoints to
             avoid interfering with user-placed corner markers.
@@ -1553,9 +1562,10 @@ def navigate_waypoints(
         visualize_corners: If True, place persistent sphere markers at each corner
             under /World/Waypoints/wp_N.
         obstacle_boxes: List of [cx, cy, sx, sy] obstacle boxes applied to EVERY
-            segment. Each segment re-plans an A* path from the robot's current pose
-            around these obstacles, so a mid-route recovery cannot beeline through
-            them. Defaults to no obstacles.
+            segment, where sx, sy are the FULL width and height in metres (the
+            footprint size, NOT half-extents). Each segment re-plans an A* path from
+            the robot's current pose around these obstacles, so a mid-route recovery
+            cannot beeline through them. Defaults to no obstacles.
 
     Poll get_navigation_status() for seq_index / seq_total progress.
     Call stop_navigation() to abort the sequence.
